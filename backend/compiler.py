@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, asdict
 import hashlib
+from functools import lru_cache
 import json
 import os
 from pathlib import Path
@@ -10,8 +11,19 @@ import sys
 import tempfile
 
 from triton import knobs
-from triton._C.libtriton import ir, llvm, passes, vortex
+from triton._C.libtriton import ir, llvm, passes
 from triton.backends.compiler import BaseBackend, GPUTarget, Language
+
+
+@lru_cache(maxsize=1)
+def native():
+    # Delay loading until compilation: Python backend discovery also runs at setup.
+    try:
+        from . import _C
+    except ImportError as error:
+        raise RuntimeError("Build the Vortex extension first: make compiler (workspace) or make (tt-vortex)") from error
+    passes.plugin.extend_with(_C.__file__)
+    return _C
 
 
 def sdk_paths():
@@ -75,6 +87,7 @@ class VortexBackend(BaseBackend):
         home, tools, llvm_dir, build = sdk_paths()
         digest = hashlib.sha256(Path(__file__).read_bytes())
         digest.update(str(tools).encode())
+        digest.update(Path(native().__file__).read_bytes())
         for path in (home / "sw/kernel/src/vx_start.S", home / "sw/kernel/src/common.h",
                      home / "sw/kernel/scripts/link32.ld", home / "sw/kernel/scripts/vxbin.py",
                      build / "sw/VX_config.h", build / "sw/VX_types.h",
@@ -131,11 +144,12 @@ class VortexBackend(BaseBackend):
 
     @staticmethod
     def make_llir(mod, metadata, options):
+        vortex = native()
         metadata["name"] = mod.get_entry_func_name()
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
         passes.convert.add_scf_to_cf(pm)
-        vortex.passes.ttgpuir.add_to_llvmir(pm)
+        passes.plugin.add_vortex_to_llvm(pm)
         passes.convert.add_reconcile_unrealized_casts(pm)
         passes.common.add_canonicalizer(pm)
         passes.common.add_cse(pm)

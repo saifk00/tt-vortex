@@ -5,10 +5,10 @@
 
 namespace mlir::triton::vortex {
 #define GEN_PASS_DECL
-#include "vortex/include/TritonVortexGPUToLLVM/Passes.h.inc"
+#include "TritonVortexGPUToLLVM/Passes.h.inc"
 
 #define GEN_PASS_REGISTRATION
-#include "vortex/include/TritonVortexGPUToLLVM/Passes.h.inc"
+#include "TritonVortexGPUToLLVM/Passes.h.inc"
 } // namespace mlir::triton::vortex
 
 #endif

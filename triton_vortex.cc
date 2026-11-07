@@ -1,6 +1,6 @@
 #include "TritonVortexGPUToLLVM/Passes.h"
 #include "mlir/Pass/PassManager.h"
-#include "passes.h"
+#include "triton/Tools/PluginUtils.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
@@ -71,15 +71,24 @@ static unsigned addLaunchWrapper(llvm::Module &module, const std::string &name) 
   return llvm::alignTo(offset, 8);
 }
 
-static void init_passes(py::module_ &m) {
-  ADD_PASS_WRAPPER_0("add_to_llvmir",
-                     mlir::triton::vortex::createConvertTritonGPUToVortexLLVM);
+static void addVortexPass(mlir::PassManager *pm,
+                          const std::vector<std::string> &) {
+  pm->addPass(mlir::triton::vortex::createConvertTritonGPUToVortexLLVM());
 }
 
-void init_triton_vortex(py::module_ &m) {
-  auto passes = m.def_submodule("passes");
-  auto ttgpuir = passes.def_submodule("ttgpuir");
-  init_passes(ttgpuir);
+// The pass implementation registers itself when the library is loaded.
+static void registerVortexPass() {}
+
+TRITON_PLUGIN_API mlir::triton::plugin::PluginInfo *tritonGetPluginInfo() {
+  static mlir::triton::plugin::PassInfo pass = {
+      "vortex_to_llvm", "0.1", addVortexPass, registerVortexPass};
+  static mlir::triton::plugin::PluginInfo info = {
+      TRITON_PLUGIN_API_VERSION, "Vortex", "0.1", &pass, 1,
+      nullptr, 0, nullptr, 0, TRITON_VERSION};
+  return &info;
+}
+
+NB_MODULE(_C, m) {
   m.def("add_launch_wrapper", &addLaunchWrapper);
   m.def("set_target", [](llvm::Module &module) {
     module.setTargetTriple(llvm::Triple("riscv32-unknown-elf"));

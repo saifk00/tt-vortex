@@ -8,7 +8,7 @@ complete Triton implementation.
 
 ## Tested dependencies
 
-- Triton [`b7ddcf86`](https://github.com/triton-lang/triton/commit/b7ddcf86c095de79527ba3098503e73158bb94bd), built from source with this plugin.
+- Published Triton 3.9.0 wheel (source revision [`b7ddcf86`](https://github.com/triton-lang/triton/commit/b7ddcf86c095de79527ba3098503e73158bb94bd)), with native extension support and headers.
 - Vortex [`50cb1745`](https://github.com/vortexgpgpu/vortex/commit/50cb174546ec69a3869b42b8871e932e4440511f), runtime API in `vortex2.h` and a configured RV32 build.
 - Vortex toolchain `v3.0.1`, including Vortex Clang 20.1.8 (`a81a5957`).
 - Linux x86-64 host, Python 3.13, and GCC/Clang supporting C++17 and GNU assembly labels.
@@ -17,22 +17,69 @@ Triton native APIs evolve quickly; these revisions record the tested combination
 not a compatibility guarantee for other releases. The simulated add sweep used
 one core, four 32-thread warps, and a 16 KiB L1 D-cache.
 
+## CI dependency inputs
+
+[ci/dependencies.lock.json](ci/dependencies.lock.json) records the selected source
+commits, Triton's wheel and LLVM/MLIR URLs and SHA-256 checksums, Vortex's prebuilt
+toolchain commit, Python version, and simulator configuration. The LLVM downloader
+consumes this manifest; the CI workflow and simulator artifact builder remain to
+be wired up.
+
+Both LLVM toolchains can be downloaded rather than built. They are distinct:
+Triton's LLVM/MLIR builds the compiler plugin, while Vortex LLVM generates the
+RV32 device image. Vortex's `v3.0.1` toolchain tag is movable, so downloads must
+use the recorded commit, not resolve the label anew on every run.
+
+The native extension is built independently against the published Triton wheel.
+The wheel exports Triton/LLVM/MLIR symbols and supplies generated Triton headers;
+the LLVM SDK supplies the remaining headers and TableGen. We do not rebuild or
+relink Triton or LLVM. Python discovers the backend through a `triton.backends`
+entry point, and the backend loads the native lowering with
+`passes.plugin.extend_with()`. The same shared library exposes the native LLVM
+launch-wrapper helpers through nanobind. Its bytes are included in the compiler
+cache key, so rebuilding the lowering invalidates cached VXBINs.
+
+A separate prebuilt SimX/runtime bundle can be reused across plugin changes,
+keyed by the Vortex/toolchain commits, hardware configuration, host platform and
+build recipe. Its bundle must include the runtime libraries, generated headers
+and their dependencies.
+
+Upstream Vortex CI uploads build artifacts, but its default four-thread warp
+configuration does not match this project's 32-thread warp. Those artifacts are
+not a drop-in simulator bundle for this example. A resource-build job can build
+the matching simulator once and publish a checksum-verified archive; test jobs
+then download it and the pinned Triton wheel, build the current plugin extension,
+compile add, and check results.
+
 ## Installation
 
-Triton's supported `TRITON_PLUGIN_DIRS` mechanism compiles the native pass into
-`libtriton.so` and installs links for the backend and templates:
+Use an activated Python 3.12+ environment with a host C++ compiler and Make:
 
 ```bash
-# In an activated virtual environment; install Triton's build requirements first.
-uv pip install 'setuptools>=40.8.0' wheel 'cmake>=3.20,<4' 'ninja>=1.11.1' nanobind==2.10.2
-TRITON_PLUGIN_DIRS=/absolute/path/to/tt-vortex \
-  uv pip install --no-build-isolation -e /absolute/path/to/triton
+uv pip install 'triton==3.9.0' 'setuptools>=64' wheel 'cmake>=3.26,<4' ninja nanobind==2.10.2
+make install
 ```
 
-Rebuild the configured Triton CMake tree after native C++ changes. Python backend
-and template changes do not need a native rebuild. This is not a pure-Python
-plugin for arbitrary prebuilt Triton wheels. Install/configure the Vortex SDK
-separately using [Vortex's build instructions](https://github.com/vortexgpgpu/vortex/blob/50cb174546ec69a3869b42b8871e932e4440511f/docs/install_vortex.md).
+`make install` downloads the pinned LLVM development SDK if needed, builds only
+our extension, registers the editable Python package, and installs the AOT
+templates. Native output is `backend/_C.abi3.so`; build files and clangd commands
+are in `build/`. An existing SDK can be selected with
+`make install LLVM_SYSPATH=/path/to/pinned/llvm`.
+
+For subsequent native edits run `make`; Python edits are visible immediately in
+the editable install. After template edits run `make install-templates`. AOT
+looks up template files by path inside the installed Triton package, so this
+small copy step is required for editable installs. Normal wheels include those
+files directly. To package after the native build, run
+`uv build --wheel --no-build-isolation`.
+
+In the parent workspace, `make setup` installs the locked environment and builds
+the extension; `make compiler` rebuilds it; `make run DRIVER=simx` compiles and
+simulates add. No source-checkout `PYTHONPATH`, `.pth`, or `TRITON_PLUGIN_DIRS`
+setting is required. Remove old overrides before invoking Python directly.
+
+Install/configure the Vortex SDK separately using
+[Vortex's build instructions](https://github.com/vortexgpgpu/vortex/blob/50cb174546ec69a3869b42b8871e932e4440511f/docs/install_vortex.md).
 
 ## Compilation
 
@@ -88,8 +135,8 @@ AST → built-in TTIR cleanup → TTGIR → native Vortex LLVM conversion
 | [TritonGPUToLLVM.cpp](lib/TritonVortexGPUToLLVM/TritonGPUToLLVM.cpp) | Native lowering patterns |
 | [CSR.h](include/TritonVortexGPUToLLVM/CSR.h) | CSR definitions |
 
-Triton's installer links `tools/vortex` into `triton.tools.extra.vortex`, just
-as NVIDIA's `tools/cuda` becomes `extra/cuda`. No Triton source edits are needed.
+The package installs `tools/vortex` as `triton.tools.extra.vortex`, where the
+standard AOT CLI looks for its templates. No Triton source edits are needed.
 
 The generated C-linkage function takes a Vortex device, queue, and kernel arguments.
 Pointer arguments are uint64 device addresses from `vx_buffer_address`.
@@ -122,10 +169,11 @@ Triton's separate multi-variant AOT linker does not have Vortex templates yet.
 With the plugin installed and the SDK environment above, run from this repository:
 
 ```bash
-python -m unittest discover -s tests -v
+make test
 ```
 
-The tests compile kernels and host launchers without a GPU or simulator. They
+The 13 tests check discovery, standalone loading, native cache invalidation,
+kernel compilation and the host launcher ABI without a GPU or simulator. They
 use kernels defined in the test file and respect `VORTEX_HOME`, so no parent
 workspace examples are required. End-to-end simulation was validated separately
 with a host benchmark: BLOCK=128/256/512/1024 × WARPS=1/2/4, N=1024, three launches

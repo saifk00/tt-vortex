@@ -16,7 +16,7 @@ import triton.language as tl
 from triton import knobs
 from triton.backends.compiler import GPUTarget
 from triton.compiler import ASTSource, make_backend
-from triton.backends.vortex.compiler import sdk_paths
+from tt_vortex.compiler import sdk_paths, native
 
 
 @triton.jit
@@ -47,6 +47,21 @@ class ExternalBackendTests(unittest.TestCase):
         self.assertEqual(type(backend).__name__, "VortexBackend")
         expected = Path(__file__).resolve().parents[1] / "backend/compiler.py"
         self.assertEqual(Path(inspect.getfile(type(backend))).resolve(), expected)
+
+    def test_native_library_is_separate_from_triton(self):
+        from triton._C import libtriton
+        self.assertFalse(hasattr(libtriton, "vortex"))
+        self.assertNotEqual(Path(native().__file__).resolve(), Path(libtriton.__file__).resolve())
+        self.assertTrue(hasattr(libtriton.passes.plugin, "add_vortex_to_llvm"))
+
+    def test_native_binary_changes_invalidate_cache(self):
+        backend = make_backend(GPUTarget("vortex", 32, 32))
+        original = backend.hash()
+        changed = self.output / "changed-native.so"
+        changed.write_bytes(b"a different native implementation")
+        with patch("tt_vortex.compiler.native") as extension:
+            extension.return_value.__file__ = str(changed)
+            self.assertNotEqual(backend.hash(), original)
 
     def test_string_target_matches_integer_target(self):
         target = GPUTarget(*"vortex:32:32".split(":"))
@@ -102,7 +117,7 @@ class ExternalBackendTests(unittest.TestCase):
                         "-I", str(sdk_paths()[0] / "sw/runtime/include"), "-o", str(self.output / "launcher.o")], check=True)
 
     def test_aot_python_api_uses_vortex_types(self):
-        from triton.backends.vortex.driver import VortexDriver
+        from tt_vortex.driver import VortexDriver
         from triton.tools.compile import CompileArgs, compile_kernel
 
         with patch.object(triton.runtime.driver, "_active", VortexDriver()):

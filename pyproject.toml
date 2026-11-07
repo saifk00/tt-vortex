@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tt-vortex"
+version = "0.1.0"
+description = "Experimental Vortex backend for Triton"
+requires-python = ">=3.12"
+dependencies = ["triton==3.9.0"]
+
+[project.entry-points."triton.backends"]
+vortex = "tt_vortex"
+
+[tool.setuptools]
+packages = ["tt_vortex", "triton.tools.extra.vortex"]
+
+[tool.setuptools.package-dir]
+tt_vortex = "backend"
+"triton.tools.extra.vortex" = "tools/vortex"
+
+[tool.setuptools.package-data]
+tt_vortex = ["_C*.so"]
+"triton.tools.extra.vortex" = ["compile.*"]
