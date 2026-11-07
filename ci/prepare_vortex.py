@@ -64,9 +64,19 @@ def main():
         run("cmake", "-S", ramulator, "-B", ramulator / "build", *cmake_sources)
         run("cmake", "--build", ramulator / "build", "--target", "ramulator", "--parallel", args.jobs)
         run("make", "-C", source / "third_party", f"-j{args.jobs}", "softfloat", "ramulator")
-        run("make", "-C", build / "sw/runtime", f"-j{args.jobs}", "CXX=g++", "DEBUG=",
+        # Vortex uses -Werror; external fmt headers trigger newer compiler diagnostics.
+        # Classify third-party includes correctly while retaining errors in Vortex.
+        external_headers = [source / "third_party/softfloat/source/include",
+                            ramulator / "ext/spdlog/include", ramulator / "ext/yaml-cpp/include",
+                            ramulator / "src"]
+        # Exporting CXXFLAGS makes runtime-only resolved macros leak into SimX's
+        # recursive make. Put common system includes in the compiler command instead.
+        compiler = "g++ " + " ".join(f"-isystem {shlex.quote(str(path))}" for path in external_headers)
+        runtime_env = dict(os.environ)
+        runtime_env.pop("CXXFLAGS", None)
+        run("make", "-C", build / "sw/runtime", f"-j{args.jobs}", f"CXX={compiler}", "DEBUG=",
             f"PERF={1 if spec['simulator']['performance_counters'] else ''}",
-            f"CONFIGS={settings['CONFIGS']}", "stub", spec["simulator"]["driver"])
+            f"CONFIGS={settings['CONFIGS']}", "stub", spec["simulator"]["driver"], env=runtime_env)
         stamp.write_text(signature + "\n")
     else:
         print(f"Reusing pinned SimX SDK: {root}")
