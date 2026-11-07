@@ -43,6 +43,20 @@
         "VX_CFG_NUM_WARPS": 4,
         "VX_CFG_NUM_THREADS": 32
       }
+    },
+    "ramulator_dependencies": {
+      "yaml-cpp": {
+        "repository": "https://github.com/jbeder/yaml-cpp.git",
+        "commit": "0579ae3d976091d7d664aa9d2527e0d0cff25763"
+      },
+      "spdlog": {
+        "repository": "https://github.com/gabime/spdlog.git",
+        "commit": "ad0e89cbfb4d0c1ce4d097e134eb7be67baebb36"
+      },
+      "argparse": {
+        "repository": "https://github.com/p-ranav/argparse.git",
+        "commit": "997da9255618311d1fcb0135ce86022729d1f1cb"
+      }
     }
   }
 }

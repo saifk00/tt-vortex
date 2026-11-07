@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  simx:
+    name: Compile and simulate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      JOBS: '2'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: |
+            ci/requirements.txt
+            ci/dependencies.lock.json
+      - name: Install build dependencies and pinned Triton wheel
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y clang build-essential
+          python -m pip install -r ci/requirements.txt
+          python - <<'PY'
+          import json, subprocess, sys
+          pin = json.load(open('ci/dependencies.lock.json'))['triton']['wheel']
+          subprocess.run([sys.executable, '-m', 'pip', 'install', pin['url'] + '#sha256=' + pin['sha256']], check=True)
+          PY
+      - name: Cache LLVM development SDK
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: .cache/llvm
+          key: llvm-ubuntu24-x64-${{ hashFiles('ci/dependencies.lock.json', 'ci/fetch_llvm.py') }}
+      - name: Cache Vortex toolchains and SimX runtime
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: .cache/vortex-sdk
+          key: simx-ubuntu24-x64-${{ hashFiles('ci/dependencies.lock.json', 'ci/prepare_vortex.py', 'ci/requirements.txt') }}
+      - name: Prepare pinned Vortex SDK
+        run: python ci/prepare_vortex.py --jobs "$JOBS" --github-env "$GITHUB_ENV"
+      - name: Build and register standalone backend
+        run: |
+          make native
+          python -m pip install --no-deps --no-build-isolation -e .
+          make install-templates
+      - name: Compiler tests and AOT add on SimX
+        run: bash ci/test.sh
+      - name: Save logs, generated launchers, IR and performance counters
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: simx-results
+          path: |
+            build/ci/*.log
+            build/ci/*.csv
+            build/ci/kernel.*
+            build/ci/ir/
+            ci/dependencies.lock.json
+          retention-days: 14

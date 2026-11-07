@@ -1,5 +1,7 @@
 # tt-vortex: experimental Triton backend
 
+[![CI](https://github.com/saifk00/tt-vortex/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/saifk00/tt-vortex/actions/workflows/ci.yml)
+
 An external Triton backend for the Vortex RISC-V GPU. It supplies TTIR/TTGIR
 lowering to RV32 LLVM, VXBIN packaging, and AOT host launcher templates.
 Simple integer copy/add kernels compile and run through the Vortex runtime on
@@ -17,13 +19,59 @@ Triton native APIs evolve quickly; these revisions record the tested combination
 not a compatibility guarantee for other releases. The simulated add sweep used
 one core, four 32-thread warps, and a 16 KiB L1 D-cache.
 
-## CI dependency inputs
+## Continuous integration
+
+[GitHub Actions](.github/workflows/ci.yml) runs on pushes to `main`, pull requests,
+and manual dispatch. It uses an Ubuntu 24.04 x86-64 hosted runner with Python 3.13;
+no GPU, self-hosted runner, or repository secrets are needed. The job:
+
+1. Installs the pinned published Triton wheel and builds our standalone extension.
+2. Runs the compiler/launcher tests through Triton's normal API and AOT CLI.
+3. AOT-compiles [add](examples/add.py), builds its [host benchmark](examples/add.cpp),
+   and runs three SimX launches each for N=1024 and N=1001 (masked tail).
+4. Checks every output element and the untouched guard region, and requires
+   nonzero cycle/instruction counters. Logs, generated launchers, compiler IR,
+   and performance CSVs are uploaded as `simx-results` for 14 days.
+
+Cycles and stall/divergence counters are recorded for inspection, not enforced
+against a performance threshold. This checks functional codegen on SimX;
+processor RTL simulation remains a separate local check.
+
+The first run downloads both toolchains and builds SimX plus its dependencies.
+Later runs restore the LLVM SDK and matching Vortex runtime from Actions caches.
+Cache keys include dependency pins and build recipes; cache misses rebuild from
+the pinned sources. The plugin itself is built fresh on every run.
+
+To reproduce with an activated Python environment and host Make/GCC/Clang:
+
+```bash
+python -m pip install -r ci/requirements.txt 'triton==3.9.0'
+python ci/prepare_vortex.py --jobs 2
+source .cache/vortex-sdk/env.sh
+make native
+python -m pip install --no-deps --no-build-isolation -e .
+make install-templates
+bash ci/test.sh
+```
+
+An existing compatible SDK can instead supply `VORTEX_HOME`, `VORTEX_TOOLDIR`,
+`VORTEX_BUILD_DIR`, and `CONFIGS`, skipping `prepare_vortex.py`. The benchmark
+expects one core, four hardware warps, and 32 threads per warp. The cached SDK
+contains absolute build paths; delete `.cache/vortex-sdk` before relocating it
+or changing dependency pins locally.
+
+Enable Actions in the repository settings if disabled. The workflow needs only
+`contents: read`; its action dependencies are pinned to commit hashes. Once the
+first run passes, the badge above turns green. Branch protection may optionally
+require the `Compile and simulate` check.
+
+## Dependency inputs
 
 [ci/dependencies.lock.json](ci/dependencies.lock.json) records the selected source
 commits, Triton's wheel and LLVM/MLIR URLs and SHA-256 checksums, Vortex's prebuilt
-toolchain commit, Python version, and simulator configuration. The LLVM downloader
-consumes this manifest; the CI workflow and simulator artifact builder remain to
-be wired up.
+toolchain commit, Python version, simulator configuration, and Ramulator's
+transitive source revisions. The SDK preparation scripts consume this manifest;
+the CI wheel download also verifies its SHA-256.
 
 Both LLVM toolchains can be downloaded rather than built. They are distinct:
 Triton's LLVM/MLIR builds the compiler plugin, while Vortex LLVM generates the
@@ -39,17 +87,11 @@ entry point, and the backend loads the native lowering with
 launch-wrapper helpers through nanobind. Its bytes are included in the compiler
 cache key, so rebuilding the lowering invalidates cached VXBINs.
 
-A separate prebuilt SimX/runtime bundle can be reused across plugin changes,
-keyed by the Vortex/toolchain commits, hardware configuration, host platform and
-build recipe. Its bundle must include the runtime libraries, generated headers
-and their dependencies.
-
 Upstream Vortex CI uploads build artifacts, but its default four-thread warp
 configuration does not match this project's 32-thread warp. Those artifacts are
-not a drop-in simulator bundle for this example. A resource-build job can build
-the matching simulator once and publish a checksum-verified archive; test jobs
-then download it and the pinned Triton wheel, build the current plugin extension,
-compile add, and check results.
+not a drop-in simulator bundle for this example. Our job builds and caches its
+own matching runtime, generated headers, source files, and dependencies. No
+release artifact publishing or deployment is configured.
 
 ## Installation
 
@@ -106,8 +148,7 @@ embeds the VXBIN. Include the generated header in a host program, link
 `build/launcher.o` with Vortex's `libvortex`, allocate/upload buffers, and call
 the launcher with device addresses and `n`. Finish the queue before reading
 results. Select the built runtime driver with `VORTEX_DRIVER=simx` or `rtlsim`.
-This repository supplies the compiler and launcher, not a simulator build or
-host benchmark harness.
+The included host benchmark and `ci/test.sh` demonstrate the complete sequence.
 
 Set `TRITON_DEFAULT_BACKEND=vortex` for AOT compilation, including when using
 `--target vortex:32:32`. The CLI takes host type names from the active driver;
