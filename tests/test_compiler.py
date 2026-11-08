@@ -26,6 +26,14 @@ def vortex_copy_kernel(src, dst, n, BLOCK: tl.constexpr):
     tl.store(dst + offsets, values, mask=offsets < n)
 
 
+@triton.jit
+def vortex_block_sum_kernel(src, dst, n, BLOCK: tl.constexpr):
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    values = tl.load(src + offsets, mask=offsets < n, other=0)
+    total = tl.sum(values, axis=0)
+    tl.store(dst + tl.program_id(0), total)
+
+
 def source():
     return ASTSource(vortex_copy_kernel,
                      signature={"src": "*u16", "dst": "*u16", "n": "i32", "BLOCK": "constexpr"},
@@ -45,7 +53,8 @@ class ExternalBackendTests(unittest.TestCase):
     def test_backend_is_external(self):
         backend = make_backend(GPUTarget("vortex", 32, 32))
         self.assertEqual(type(backend).__name__, "VortexBackend")
-        expected = Path(__file__).resolve().parents[1] / "backend/compiler.py"
+        import tt_vortex
+        expected = Path(tt_vortex.__file__).parent / "compiler.py"
         self.assertEqual(Path(inspect.getfile(type(backend))).resolve(), expected)
 
     def test_native_library_is_separate_from_triton(self):
@@ -98,6 +107,27 @@ class ExternalBackendTests(unittest.TestCase):
                 self.assertIn("define void @kernel_main(ptr", llir)
                 self.assertEqual(kernel.metadata.args_size, 24)
                 self.assertEqual(struct.unpack_from("<Q", kernel.asm["vxbin"])[0], 0x80000000)
+                self.assertTrue(kernel.asm["vxbin"].endswith(b"VXSYMTAB"))
+
+    def test_block_sum(self):
+        src = ASTSource(vortex_block_sum_kernel,
+                        signature={"src": "*i32", "dst": "*i32", "n": "i32",
+                                   "BLOCK": "constexpr"},
+                        constexprs={"BLOCK": 256})
+        for warp, warps in ((32, 1), (32, 4), (4, 4)):
+            with self.subTest(warp_size=warp, num_warps=warps):
+                kernel = triton.compile(src, target=GPUTarget("vortex", 32, warp),
+                                        options={"num_warps": warps})
+                self.assertIn('"tt.reduce"', kernel.asm["ttgir"])
+                llir = kernel.asm["llir"]
+                self.assertNotIn("llvm.nvvm", llir)
+                self.assertNotIn("llvm.amdgcn", llir)
+                self.assertNotIn("global_smem", llir)
+                self.assertIn(".insn r 0x0b, 6, 1", llir)
+                self.assertEqual(kernel.metadata.shared, 0 if warps == 1 else 16)
+                if warps > 1:
+                    self.assertIn(".insn r 0x0b, 4, 0", llir)
+                    self.assertIn("i32 3295", llir)  # CTA local-memory address CSR.
                 self.assertTrue(kernel.asm["vxbin"].endswith(b"VXSYMTAB"))
 
     def test_standard_aot_cli(self):

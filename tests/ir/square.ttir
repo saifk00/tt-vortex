@@ -1,0 +1,31 @@
+// RUN: ttvortex-opt %s '--convert-triton-to-tritongpu=target=vortex:32 num-warps=4 threads-per-warp=32 num-ctas=1' --canonicalize --cse -o %t.ttgir
+// RUN: FileCheck %s --check-prefix=GPU < %t.ttgir
+// RUN: ttvortex-opt %t.ttgir --convert-triton-gpu-to-vortex-llvm --reconcile-unrealized-casts --canonicalize --cse | FileCheck %s --check-prefix=LLVM
+
+// GPU: #{{.*}} = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [4], order = [0]}>
+// GPU: ttg.target = "vortex:32"
+// GPU-LABEL: tt.func public @square
+// GPU: arith.muli {{.*}} : tensor<256xi32, #{{.*}}>
+
+// LLVM-LABEL: llvm.func @square
+// LLVM: %[[P0:.*]] = llvm.getelementptr
+// LLVM: %[[P1:.*]] = llvm.getelementptr
+// LLVM: %[[X0:.*]] = llvm.load %[[P0]]
+// LLVM: %[[X1:.*]] = llvm.load %[[P1]]
+// LLVM: %[[Y0:.*]] = llvm.mul %[[X0]], %[[X0]] : i32
+// LLVM: %[[Y1:.*]] = llvm.mul %[[X1]], %[[X1]] : i32
+// LLVM: llvm.store %[[Y0]], %[[P0]]
+// LLVM: llvm.store %[[Y1]], %[[P1]]
+// LLVM: llvm.return
+
+module {
+  tt.func public @square(%arg0: !tt.ptr<i32>) {
+    %offsets = tt.make_range {start = 0 : i32, end = 256 : i32} : tensor<256xi32>
+    %base = tt.splat %arg0 : !tt.ptr<i32> -> tensor<256x!tt.ptr<i32>>
+    %ptrs = tt.addptr %base, %offsets : tensor<256x!tt.ptr<i32>>, tensor<256xi32>
+    %x = tt.load %ptrs : tensor<256x!tt.ptr<i32>>
+    %y = arith.muli %x, %x : tensor<256xi32>
+    tt.store %ptrs, %y : tensor<256x!tt.ptr<i32>>
+    tt.return
+  }
+}

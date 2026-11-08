@@ -1,16 +1,16 @@
 """Generated host ABI tests; no simulator or GPU required."""
 
 from pathlib import Path
-import os
+from importlib.resources import files
 import subprocess
 import tempfile
 import unittest
 
 
-ROOT = Path(__file__).resolve().parents[1]
-TEMPLATES = ROOT / "tools/vortex"
-VORTEX_HOME = Path(os.environ.get("VORTEX_HOME", ROOT.parent / "vortex"))
-INCLUDE = VORTEX_HOME / "sw/runtime/include"
+from tt_vortex.sdk import sdk_paths
+
+TEMPLATES = files("triton.tools.extra.vortex")
+INCLUDE = sdk_paths()[0] / "sw/runtime/include"
 
 
 class LauncherTests(unittest.TestCase):

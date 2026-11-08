@@ -37,7 +37,10 @@ def main():
         "VORTEX_HOME": str(source),
         "VORTEX_BUILD_DIR": str(build),
         "VORTEX_TOOLDIR": str(tools),
-        "CONFIGS": " ".join(f"-D{key}={value}" for key, value in spec["simulator"]["defines"].items()),
+        # Feature switches must be bare -D flags: Vortex's Makefiles also match
+        # their literal spelling when selecting extension source files.
+        "CONFIGS": " ".join(f"-D{key}" if value is None else f"-D{key}={value}"
+                            for key, value in spec["simulator"]["defines"].items()),
     }
     # Generated Makefiles and simulator rpaths contain absolute paths.
     signature = hashlib.sha256(manifest.read_bytes() + Path(__file__).read_bytes() + str(root).encode()).hexdigest()

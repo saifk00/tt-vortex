@@ -4,6 +4,9 @@
 #include <cstdint>
 
 namespace mlir::triton::vortex {
+constexpr uint32_t CTAId = 0xcd0;
+constexpr uint32_t CTASize = 0xcd2;
+constexpr uint32_t CTALocalMemory = 0xcdf;
 constexpr uint32_t ThreadIdxX = 0xcd3;
 constexpr uint32_t BlockIdxX = 0xcd6;
 constexpr uint32_t GridDimX = 0xcdc;

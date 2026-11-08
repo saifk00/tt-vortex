@@ -33,6 +33,14 @@ def scalar_kernel(dst, value, BLOCK: tl.constexpr):
     tl.store(dst + offsets, value)
 
 
+@triton.jit
+def block_sum_kernel(src, dst, n, BLOCK: tl.constexpr):
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    values = tl.load(src + offsets, offsets < n, other=0)
+    total = tl.sum(values, axis=0)
+    tl.store(dst + tl.program_id(0), total)
+
+
 class ABITests(unittest.TestCase):
     def test_snapshot_deltas_reject_mismatched_measurements(self):
         before = CounterSnapshot({"cycles": 12, "core.DIVERGENCE": 0}, 5, 0)
@@ -86,7 +94,8 @@ int main() {
         self.assertEqual(actual, expected)
 
 
-@unittest.skipUnless(os.environ.get("VORTEX_BUILD_DIR"), "Set VORTEX_BUILD_DIR to run simulator tests")
+@unittest.skipUnless(os.environ.get("VORTEX_BUILD_DIR") or os.environ.get("VORTEX_SDK_PATH"),
+                     "Configure a Vortex SDK to run simulator tests")
 class RuntimeTests(unittest.TestCase):
     def test_named_performance_counters_for_masked_copy(self):
         with Device(driver=os.environ.get("VORTEX_DRIVER", "simx")) as dev:
@@ -130,6 +139,22 @@ class RuntimeTests(unittest.TestCase):
                     src.data_ptr()
             with self.assertRaises(RuntimeError):
                 dst.numpy()
+
+    def test_block_sum_masked_tail_and_scratch_reuse(self):
+        original = (np.arange(777, dtype=np.int32) * 193) ^ np.int32(-1234567)
+        with Device(driver=os.environ.get("VORTEX_DRIVER", "simx")) as dev:
+            src = dev.from_numpy(original)
+            dst = dev.full(4, -999)
+            for warps in (1, 4):
+                for n in (0, 1, 17, 255, 256, 257, 777):
+                    with self.subTest(num_warps=warps, n=n):
+                        dst.fill(-999)
+                        # Always launch four CTAs, including entirely masked blocks.
+                        block_sum_kernel[(4,)](src, dst, n, BLOCK=256, num_warps=warps)
+                        expected = np.array([
+                            original[start:min(start + 256, n)].sum(dtype=np.int32)
+                            for start in range(0, 1024, 256)], dtype=np.int32)
+                        np.testing.assert_array_equal(dst.numpy(), expected)
 
     def test_integer_scalar_argument_and_cached_launch(self):
         with Device(driver=os.environ.get("VORTEX_DRIVER", "simx")) as dev:

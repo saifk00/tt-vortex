@@ -14,6 +14,8 @@ from triton import knobs
 from triton._C.libtriton import ir, llvm, passes
 from triton.backends.compiler import BaseBackend, GPUTarget, Language
 
+from .sdk import sdk_paths
+
 
 @lru_cache(maxsize=1)
 def native():
@@ -21,17 +23,10 @@ def native():
     try:
         from . import _C
     except ImportError as error:
-        raise RuntimeError("Build the Vortex extension first: make compiler (workspace) or make (tt-vortex)") from error
+        raise RuntimeError("Cannot load the Vortex extension. Install a tt-vortex wheel with triton==3.9.0, "
+                           "or rebuild the extension for the installed Triton.") from error
     passes.plugin.extend_with(_C.__file__)
     return _C
-
-
-def sdk_paths():
-    home = Path(os.environ.get("VORTEX_HOME", Path(__file__).resolve().parents[2] / "vortex")).resolve()
-    tools = Path(os.environ.get("VORTEX_TOOLDIR", home / "tools")).resolve()
-    llvm_dir = Path(os.environ.get("VORTEX_LLVM_PATH", tools / "llvm-vortex")).resolve()
-    build = Path(os.environ.get("VORTEX_BUILD_DIR", home / "build32")).resolve()
-    return home, tools, llvm_dir, build
 
 
 @dataclass(frozen=True)
@@ -163,7 +158,7 @@ class VortexBackend(BaseBackend):
         llvm_mod = llvm.to_module(mod, context)
         vortex.set_target(llvm_mod)
         metadata["args_size"] = vortex.add_launch_wrapper(llvm_mod, metadata["name"])
-        metadata.update(shared=0, global_scratch_size=0, global_scratch_align=1,
+        metadata.update(shared=mod.get_int_attr("ttg.shared"), global_scratch_size=0, global_scratch_align=1,
                         profile_scratch_size=0, profile_scratch_align=1)
         return str(llvm_mod)
 

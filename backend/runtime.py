@@ -17,7 +17,7 @@ import tomllib
 import numpy as np
 import triton.language as tl
 
-from .compiler import sdk_paths
+from .sdk import sdk_paths
 
 
 class _QueueInfo(ct.Structure):

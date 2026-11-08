@@ -41,7 +41,8 @@
       "defines": {
         "VX_CFG_NUM_CORES": 1,
         "VX_CFG_NUM_WARPS": 4,
-        "VX_CFG_NUM_THREADS": 32
+        "VX_CFG_NUM_THREADS": 32,
+        "VX_CFG_EXT_A_ENABLE": null
       }
     },
     "ramulator_dependencies": {

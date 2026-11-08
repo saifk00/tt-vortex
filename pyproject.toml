@@ -1,13 +1,18 @@
 [build-system]
-requires = ["setuptools>=64", "wheel"]
+requires = ["setuptools>=77", "wheel", "cmake>=3.26", "ninja", "nanobind==2.10.2", "triton==3.9.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "tt-vortex"
 version = "0.1.0"
 description = "Experimental Vortex backend for Triton"
+readme = "README.md"
+license = "MIT"
 requires-python = ">=3.12"
 dependencies = ["triton==3.9.0", "numpy>=1.26"]
+
+[project.urls]
+Repository = "https://github.com/saifk00/tt-vortex"
 
 [project.entry-points."triton.backends"]
 vortex = "tt_vortex"
@@ -20,5 +25,4 @@ tt_vortex = "backend"
 "triton.tools.extra.vortex" = "tools/vortex"
 
 [tool.setuptools.package-data]
-tt_vortex = ["_C*.so"]
 "triton.tools.extra.vortex" = ["compile.*"]

@@ -26,11 +26,14 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
-          python-version: '3.13'
+          python-version: |
+            3.12
+            3.13
           cache: pip
           cache-dependency-path: |
             ci/requirements.txt
             ci/dependencies.lock.json
+            pyproject.toml
       - name: Install build dependencies and pinned Triton wheel
         run: |
           sudo apt-get update -qq
@@ -53,13 +56,30 @@ jobs:
           key: simx-ubuntu24-x64-${{ hashFiles('ci/dependencies.lock.json', 'ci/prepare_vortex.py', 'ci/requirements.txt') }}
       - name: Prepare pinned Vortex SDK
         run: python ci/prepare_vortex.py --jobs "$JOBS" --github-env "$GITHUB_ENV"
-      - name: Build and register standalone backend
+      - name: Build wheel from source distribution
         run: |
-          make native
-          python -m pip install --no-build-isolation -e .
-          make install-templates
-      - name: Compiler tests and JIT/AOT add on SimX
-        run: bash ci/test.sh
+          make sdk
+          LLVM_SYSPATH="$PWD/.cache/llvm" CXX=clang++ python -m build
+          # libtriton is supplied by the exact pinned Python dependency. Bundling
+          # another copy would create a second LLVM/MLIR instance in the process.
+          auditwheel repair --plat manylinux_2_39_x86_64 --only-plat --exclude libtriton.so \
+            --wheel-dir dist/portable dist/*.whl
+      - name: Native MLIR optimizer and FileCheck tests
+        run: |
+          make check-ir LIT_ARGS='-v --xunit-xml-output build/lit-results.xml'
+          python -m unittest discover -s tests -p test_opt.py -v
+      - name: Installed wheel compiler tests and JIT/AOT add on SimX
+        run: |
+          python ci/test_wheel.py dist/portable/*.whl --python python3.12 --output build/ci-py312
+          python ci/test_wheel.py dist/portable/*.whl --python python3.13 --output build/ci
+      - name: Save package distributions
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: tt-vortex-distributions
+          path: |
+            dist/*.tar.gz
+            dist/portable/*.whl
+          retention-days: 14
       - name: Save logs, generated launchers, IR and performance counters
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
@@ -76,4 +96,10 @@ jobs:
             build/ci/aot/kernel.*
             build/ci/aot/ir/
             ci/dependencies.lock.json
+            build/lit-results.xml
+            build/lit/
+            build/ci-py312/*.log
+            build/ci-py312/*.csv
+            build/ci-py312/aot/*.log
+            build/ci-py312/aot/*.csv
           retention-days: 14

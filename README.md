@@ -7,9 +7,15 @@ The aim is to make the whole path from a Python kernel to simulated GPU executio
 small enough to follow. Integer copy and add work through both Python JIT launches
 and generated AOT launchers, on SimX and processor RTL simulation.
 
-This is still an experimental compiler: one-dimensional blocked integer tensors,
-with no floating-point kernels, reductions, atomics, or shared memory yet.
-Codegen is deliberately simple.
+This is still an experimental compiler. It supports one-dimensional blocked
+tensors, f32 addition, i32 reductions and scans, and relaxed i32 atomic addition.
+Reductions and scans use Vortex shuffles and shared memory. Transpose remains
+unsupported, and codegen is deliberately simple.
+
+Binary wheels include the native lowering and AOT templates; the Vortex SDK is
+still a separate dependency. Set `VORTEX_SDK_PATH` to its root (`source/`, `tools/`,
+`build/`), or use the existing `VORTEX_HOME`, `VORTEX_TOOLDIR`, and
+`VORTEX_BUILD_DIR` settings. See [packaging](docs/packaging.md) for building wheels.
 
 ## Try it
 
@@ -41,8 +47,9 @@ AOT CLI, then builds [add.cpp](examples/add.cpp) against the generated launcher.
 The resulting executable embeds the VXBIN and runs without Python.
 
 `--block` is elements per Triton program, not elements per thread. With 32-thread
-warps, `BLOCK=256` and `num_warps=4` gives each thread two elements. For now, keep
-`BLOCK >= 32 * num_warps` and stay within the hardware's four warps per core.
+warps, `BLOCK=256` and `num_warps=4` gives each thread two elements. Use at most
+the hardware's four warps per core. Small tiles can have several physical
+threads representing the same element; stores and atomics suppress duplicate owners.
 
 ## How it works
 
@@ -56,6 +63,9 @@ published Triton wheel, so there is no Triton fork or full compiler rebuild.
 [native lowering](lib/TritonVortexGPUToLLVM/TritonGPUToLLVM.cpp) reuses Triton's
 lowering helpers and adds Vortex-specific operations. For example, program ID X
 becomes a read of CSR `0xcd6` instead of an NVIDIA special-register intrinsic.
+
+For pass development, `make opt` builds a native `ttvortex-opt` that reads TTIR
+and TTGIR directly. See [debugging](docs/debugging.md) for LLDB and pipeline commands.
 
 Both launch paths use Vortex's device memory and command queue. The
 [Python runtime](backend/runtime.py) provides typed buffers and NumPy transfers;
@@ -75,13 +85,18 @@ saves CSVs and the final output buffer. Detailed counters need a `PERF=1` runtim
 as the setup above builds.
 
 ```bash
+make check-ir
 bash ci/test.sh
 ```
 
-This runs the tests and both launch paths, checking that their outputs and all
+FileCheck tests cover the native lowering; transpose is marked as an expected
+failure until its layout support lands. The Python tests also simulate the
+[basic kernels](examples/basic.py), including partial tiles and returned atomic values.
+The add checks exercise both launch paths, checking that their outputs and all
 38 counter deltas agree. Both examples use the same buffers, uploads, warm-up,
 and measurement boundaries; host wall-clock timings are excluded. CI runs this
-on SimX and saves the logs, IR, launchers, and measurements as artifacts.
+on SimX from an installed wheel in fresh Python 3.12 and 3.13 environments, and
+saves the distributions, logs, IR, launchers, and measurements as artifacts.
 
 RTL is also supported with a matching runtime build: use `--driver rtlsim` for
 the Python example or `VORTEX_DRIVER=rtlsim` for the AOT script.

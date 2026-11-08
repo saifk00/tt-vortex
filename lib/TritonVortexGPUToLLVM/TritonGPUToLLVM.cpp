@@ -1,12 +1,17 @@
 #include "TritonVortexGPUToLLVM/CSR.h"
 #include "TritonVortexGPUToLLVM/Passes.h"
+#include "TritonVortexGPUToLLVM/TargetInfo.h"
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
 #include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
 #include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVM.h"
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "triton/Analysis/Allocation.h"
 #include "triton/Analysis/AxisInfo.h"
+#include "triton/Analysis/Membar.h"
+#include "triton/Conversion/TritonGPUToLLVM/AllocateSharedMemoryUtility.h"
+#include "triton/Conversion/TritonGPUToLLVM/ElementwiseOpToLLVMBase.h"
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h"
@@ -45,16 +50,7 @@ private:
   }
 };
 
-Value readCSR(Location loc, ConversionPatternRewriter &rewriter, uint32_t csr) {
-  auto b = TritonLLVMOpBuilder(loc, rewriter);
-  return LLVM::InlineAsmOp::create(
-             rewriter, loc, rewriter.getI32Type(), ValueRange{b.i32_val(csr)},
-             "csrr $0, $1", "=r,i", false, false, LLVM::TailCallKind::None,
-             LLVM::AsmDialectAttr::get(rewriter.getContext(),
-                                       LLVM::AsmDialect::AD_ATT),
-             ArrayAttr())
-      .getResult(0);
-}
+using triton::vortex::readCSR;
 
 struct GetProgramIdOpConversion
     : ConvertOpToLLVMPattern<triton::GetProgramIdOp> {
@@ -217,7 +213,11 @@ struct LoadOpConversion : ConvertOpToLLVMPattern<triton::LoadOp> {
 };
 
 struct StoreOpConversion : ConvertOpToLLVMPattern<triton::StoreOp> {
-  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+  StoreOpConversion(LLVMTypeConverter &converter,
+                    const triton::vortex::TargetInfo &targetInfo,
+                    PatternBenefit benefit)
+      : ConvertOpToLLVMPattern(converter, benefit), targetInfo(targetInfo) {}
+  const triton::vortex::TargetInfo &targetInfo;
   LogicalResult
   matchAndRewrite(triton::StoreOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
@@ -230,9 +230,13 @@ struct StoreOpConversion : ConvertOpToLLVMPattern<triton::StoreOp> {
     SmallVector<Value> masks;
     if (adaptor.getMask())
       masks = unpackLLElements(loc, adaptor.getMask(), rewriter);
+    Value threadPred = ttg::emitRedundantThreadPredicate(
+        getFreeVariableMasks(op.getPtr().getType()), rewriter, loc, targetInfo);
     for (unsigned i = 0; i < pointers.size(); ++i) {
+      Value mask = ttg::maybeAnd(rewriter, loc, threadPred,
+                                masks.empty() ? Value() : masks[i]);
       unsigned alignment = values[i].getType().getIntOrFloatBitWidth() / 8;
-      if (masks.empty()) {
+      if (!mask) {
         LLVM::StoreOp::create(rewriter, loc, values[i], pointers[i], alignment);
         continue;
       }
@@ -242,7 +246,7 @@ struct StoreOpConversion : ConvertOpToLLVMPattern<triton::StoreOp> {
       LLVM::StoreOp::create(rewriter, loc, values[i], pointers[i], alignment);
       LLVM::BrOp::create(rewriter, loc, ValueRange{}, merge);
       rewriter.setInsertionPointToEnd(head);
-      LLVM::CondBrOp::create(rewriter, loc, masks[i], write, merge);
+      LLVM::CondBrOp::create(rewriter, loc, mask, write, merge);
       rewriter.setInsertionPoint(op);
     }
     rewriter.eraseOp(op);
@@ -250,9 +254,109 @@ struct StoreOpConversion : ConvertOpToLLVMPattern<triton::StoreOp> {
   }
 };
 
+struct AtomicRMWOpConversion : ConvertOpToLLVMPattern<triton::AtomicRMWOp> {
+  AtomicRMWOpConversion(LLVMTypeConverter &converter,
+                        const triton::vortex::TargetInfo &targetInfo,
+                        PatternBenefit benefit)
+      : ConvertOpToLLVMPattern(converter, benefit), targetInfo(targetInfo) {}
+
+  LogicalResult
+  matchAndRewrite(triton::AtomicRMWOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Type type = getElementTypeOrSelf(op.getType());
+    if (!type.isInteger(32) || op.getAtomicRmwOp() != RMWOp::ADD ||
+        op.getSem() != MemSemantic::RELAXED)
+      return rewriter.notifyMatchFailure(
+          op, "Vortex atomics currently require relaxed i32 addition");
+
+    auto loc = op.getLoc();
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
+    auto pointers = unpackLLElements(loc, adaptor.getPtr(), rewriter);
+    auto values = unpackLLElements(loc, adaptor.getVal(), rewriter);
+    SmallVector<Value> masks, results;
+    if (adaptor.getMask())
+      masks = unpackLLElements(loc, adaptor.getMask(), rewriter);
+    // Suppress duplicate layout owners, not distinct elements that happen to
+    // address the same word: those must each perform their atomic update.
+    Value threadPred = ttg::emitRedundantThreadPredicate(
+        getFreeVariableMasks(op.getPtr().getType()), rewriter, loc, targetInfo);
+    for (unsigned i = 0; i < pointers.size(); ++i) {
+      Value mask = ttg::maybeAnd(rewriter, loc, threadPred,
+                                masks.empty() ? Value() : masks[i]);
+      if (!mask)
+        mask = b.true_val();
+      Value inactive = b.undef(type);
+      Block *head = rewriter.getInsertionBlock();
+      Block *merge = rewriter.splitBlock(head, Block::iterator(op));
+      Value result = merge->addArgument(type, loc);
+      Block *update = rewriter.createBlock(merge);
+      // Default LLVM system scope also satisfies Triton's GPU/CTA scopes.
+      // The SDK lowers this to RISC-V AMOADD.W, without acquire/release bits.
+      Value old = LLVM::AtomicRMWOp::create(
+          rewriter, loc, LLVM::AtomicBinOp::add, pointers[i], values[i],
+          LLVM::AtomicOrdering::monotonic);
+      LLVM::BrOp::create(rewriter, loc, old, merge);
+      rewriter.setInsertionPointToEnd(head);
+      LLVM::CondBrOp::create(rewriter, loc, mask, update, ValueRange{}, merge,
+                            ValueRange{inactive});
+      rewriter.setInsertionPoint(op);
+      results.push_back(result);
+    }
+    if (op->use_empty()) {
+      rewriter.eraseOp(op);
+    } else {
+      // Replicate canonical owners' old values for redundant lanes/warps.
+      if (!threadPred)
+        threadPred = b.true_val();
+      finalizeAtomicResults(op, rewriter, results, type, b, threadPred,
+                            targetInfo, getTypeConverter());
+    }
+    return success();
+  }
+
+  const triton::vortex::TargetInfo &targetInfo;
+};
+
+struct BarrierOpConversion : ConvertOpToLLVMPattern<ttg::BarrierOp> {
+  BarrierOpConversion(LLVMTypeConverter &converter,
+                      const triton::vortex::TargetInfo &targetInfo,
+                      PatternBenefit benefit)
+      : ConvertOpToLLVMPattern(converter, benefit), targetInfo(targetInfo) {}
+  LogicalResult
+  matchAndRewrite(ttg::BarrierOp op, OpAdaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    targetInfo.barrier(op.getLoc(), rewriter, op.getAddrSpace());
+    rewriter.eraseOp(op);
+    return success();
+  }
+  const triton::vortex::TargetInfo &targetInfo;
+};
+
 struct ConvertTritonGPUToVortexLLVM
     : triton::vortex::impl::ConvertTritonGPUToVortexLLVMBase<
           ConvertTritonGPUToVortexLLVM> {
+  void populateConversionPatterns(VortexTypeConverter &converter,
+                                  RewritePatternSet &patterns,
+                                  ModuleAxisInfoAnalysis &axisInfo,
+                                  const triton::vortex::TargetInfo &targetInfo) {
+    auto benefit = PatternBenefit(patternBenefitPrioritizeOverLLVMConversions);
+    populateElementwiseOpToLLVMPatterns(converter, patterns, axisInfo, benefit);
+    patterns.add<ttg::ElementwiseOpConversion<arith::AddFOp, LLVM::FAddOp>>(
+        converter, axisInfo, benefit);
+    populateViewOpToLLVMPatterns(converter, patterns, benefit);
+    populateReduceOpToLLVMPatterns(converter, patterns, targetInfo, benefit);
+    populateScanOpToLLVMPatterns(converter, patterns, targetInfo, benefit);
+    populateConvertLayoutOpToLLVMPatterns(converter, targetInfo, patterns, benefit);
+    patterns
+        .add<GetProgramIdOpConversion, GetNumProgramsOpConversion,
+             ThreadIdOpConversion, WarpIdOpConversion, MakeRangeOpConversion,
+             LoadOpConversion, ReturnOpConversion>(converter, benefit);
+    patterns.add<StoreOpConversion, AtomicRMWOpConversion, BarrierOpConversion>(
+        converter, targetInfo, benefit);
+    arith::populateArithToLLVMConversionPatterns(converter, patterns);
+    cf::populateControlFlowToLLVMConversionPatterns(converter, patterns);
+  }
+
   void runOnOperation() override {
     ModuleOp mod = getOperation();
     MLIRContext *ctx = mod.getContext();
@@ -264,6 +368,20 @@ struct ConvertTritonGPUToVortexLLVM
       return;
     }
     WalkResult supported = mod.walk([&](Operation *op) {
+      if (isa<triton::ScanOp>(op) &&
+          llvm::any_of(op->getResultTypes(), [](Type type) {
+            return !getElementTypeOrSelf(type).isInteger(32);
+          })) {
+        op->emitError("Vortex scans currently require i32 elements");
+        return WalkResult::interrupt();
+      }
+      if (auto reduce = dyn_cast<triton::ReduceOp>(op)) {
+        if (llvm::any_of(reduce.getElementTypes(),
+                         [](Type type) { return !type.isInteger(32); })) {
+          op->emitError("Vortex reductions currently require i32 elements");
+          return WalkResult::interrupt();
+        }
+      }
       for (Type type : op->getResultTypes()) {
         if (auto tensor = dyn_cast<RankedTensorType>(type)) {
           Type element = tensor.getElementType();
@@ -271,9 +389,9 @@ struct ConvertTritonGPUToVortexLLVM
             element = ptr.getPointeeType();
           if (tensor.getRank() != 1 ||
               !isa<ttg::BlockedEncodingAttr>(tensor.getEncoding()) ||
-              !isa<IntegerType>(element)) {
+              !(isa<IntegerType>(element) || element.isF32())) {
             op->emitError(
-                "Vortex currently supports rank-one blocked integer tensors");
+                "Vortex currently supports rank-one blocked integer or f32 tensors");
             return WalkResult::interrupt();
           }
         }
@@ -284,6 +402,12 @@ struct ConvertTritonGPUToVortexLLVM
       signalPassFailure();
       return;
     }
+    triton::vortex::TargetInfo targetInfo(
+        ttg::TritonGPUDialect::getThreadsPerWarp(mod));
+    ModuleAllocation allocation(mod);
+    ttg::attachAllocationSizeAndOffsetAttr(mod, allocation);
+    ModuleMembarAnalysis membar(allocation);
+    membar.run();
     VortexTypeConverter converter(ctx);
     RewritePatternSet functions(ctx);
     functions.add<FuncOpConversion>(converter);
@@ -298,21 +422,30 @@ struct ConvertTritonGPUToVortexLLVM
     }
     ModuleAxisInfoAnalysis axisInfo(mod);
     RewritePatternSet patterns(ctx);
-    auto benefit = PatternBenefit(patternBenefitPrioritizeOverLLVMConversions);
-    populateElementwiseOpToLLVMPatterns(converter, patterns, axisInfo, benefit);
-    populateViewOpToLLVMPatterns(converter, patterns, benefit);
-    patterns
-        .add<GetProgramIdOpConversion, GetNumProgramsOpConversion,
-             ThreadIdOpConversion, WarpIdOpConversion, MakeRangeOpConversion,
-             LoadOpConversion, StoreOpConversion, ReturnOpConversion>(converter,
-                                                                      benefit);
-    arith::populateArithToLLVMConversionPatterns(converter, patterns);
-    cf::populateControlFlowToLLVMConversionPatterns(converter, patterns);
+    populateConversionPatterns(converter, patterns, axisInfo, targetInfo);
+    // Triton's generic layout conversions resolve scratch through this symbol.
+    // Vortex provides the address through a per-CTA CSR instead of a linker symbol.
+    OpBuilder globals(mod.getBodyRegion());
+    auto smem = LLVM::GlobalOp::create(
+        globals, mod.getLoc(), LLVM::LLVMArrayType::get(globals.getI8Type(), 0),
+        false, LLVM::Linkage::External, "global_smem", Attribute(), 16, 0);
     ConversionTarget target(*ctx);
     target.addLegalDialect<LLVM::LLVMDialect>();
     target.addLegalOp<ModuleOp, UnrealizedConversionCastOp>();
-    if (failed(applyFullConversion(mod, target, std::move(patterns))))
+    if (failed(applyFullConversion(mod, target, std::move(patterns)))) {
       signalPassFailure();
+      return;
+    }
+    IRRewriter rewriter(ctx);
+    mod.walk([&](LLVM::AddressOfOp op) {
+      if (op.getGlobalName() != "global_smem")
+        return;
+      rewriter.setInsertionPoint(op);
+      auto address = readCSR(op.getLoc(), rewriter,
+                             triton::vortex::CTALocalMemory);
+      rewriter.replaceOpWithNewOp<LLVM::IntToPtrOp>(op, op.getType(), address);
+    });
+    smem.erase();
   }
 };
 

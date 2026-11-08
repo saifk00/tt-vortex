@@ -1,0 +1,11 @@
+include CMakeLists.txt triton_vortex.cc Makefile
+recursive-include include *.h *.td
+recursive-include lib *.cpp *.h
+recursive-include ci *.py *.sh *.txt *.json
+recursive-include tools/vortex *.py *.cpp *.h
+include tools/ttvortex-opt.cpp
+recursive-include examples *.py *.cpp *.sh
+recursive-include tests *.py
+recursive-include tests/ir *.ttir *.ttgir *.mlir *.md
+recursive-include docs *.md
+global-exclude *.so *.pyc
