@@ -11,7 +11,7 @@ mkdir -p "$out"
 export TRITON_CACHE_DIR="$out/cache"
 export TRITON_KERNEL_DUMP=1 TRITON_DUMP_DIR="$out/ir"
 
-python -m unittest discover -s tests -v 2>&1 | tee "$out/tests.log"
+timeout 600 python -m unittest discover -s tests -v 2>&1 | tee "$out/tests.log"
 VORTEX_DRIVER=simx AOT_OUT_DIR="$out/aot" bash examples/run_aot.sh 1024 1001
 for n in 1024 1001; do
     VORTEX_DRIVER=simx timeout 120 python examples/add.py --n "$n" --repeats 3 \

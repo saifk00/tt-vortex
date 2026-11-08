@@ -1,0 +1,66 @@
+// RUN: ttvortex-opt %s --split-input-file --convert-triton-gpu-to-vortex-llvm --reconcile-unrealized-casts --canonicalize --cse | FileCheck %s --implicit-check-not='tensor<' --implicit-check-not='llvm.fptosi' --implicit-check-not='llvm.sitofp'
+
+// Isolate the payload exchange from the full kernel's pointer/mask conversions.
+// A single warp transposes 8x8 f32 through registers and indexed shuffles.
+// CHECK: ttg.shared = 0 : i32
+// CHECK-LABEL: llvm.func @transpose_warp
+// CHECK: %[[BITS0:.*]] = llvm.bitcast %{{.*}} : f32 to i32
+// CHECK: %[[SHFL0:.*]] = llvm.inline_asm has_side_effects asm_dialect = att ".insn r 0x0b, 7, 1, $0, $1, $2", "=r,r,r" %[[BITS0]], %{{.*}} : (i32, i32) -> i32
+// CHECK: %[[FLOAT0:.*]] = llvm.bitcast %[[SHFL0]] : i32 to f32
+// CHECK: %[[BITS1:.*]] = llvm.bitcast %{{.*}} : f32 to i32
+// CHECK: %[[SHFL1:.*]] = llvm.inline_asm has_side_effects asm_dialect = att ".insn r 0x0b, 7, 1, $0, $1, $2", "=r,r,r" %[[BITS1]], %{{.*}} : (i32, i32) -> i32
+// CHECK: %[[FLOAT1:.*]] = llvm.bitcast %[[SHFL1]] : i32 to f32
+// CHECK: %[[OUT0:.*]] = llvm.select %{{.*}}, %[[FLOAT0]], %[[FLOAT1]] : i1, f32
+// CHECK: %[[OUT1:.*]] = llvm.select %{{.*}}, %[[FLOAT1]], %[[FLOAT0]] : i1, f32
+// CHECK: %[[PACK0:.*]] = llvm.insertvalue %[[OUT0]], %{{.*}}[0]
+// CHECK: %[[PACK1:.*]] = llvm.insertvalue %[[OUT1]], %[[PACK0]][1]
+// CHECK: llvm.return %[[PACK1]]
+
+#src = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [4, 8], warpsPerCTA = [1, 1], order = [1, 0]}>
+#transposed = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [8, 4], warpsPerCTA = [1, 1], order = [0, 1]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.target = "vortex:32", "ttg.threads-per-warp" = 32 : i32} {
+  tt.func @transpose_warp(%arg: tensor<8x8xf32, #src>) -> tensor<8x8xf32, #src> {
+    %t = tt.trans %arg {order = array<i32: 1, 0>} : tensor<8x8xf32, #src> -> tensor<8x8xf32, #transposed>
+    %out = ttg.convert_layout %t : tensor<8x8xf32, #transposed> -> tensor<8x8xf32, #src>
+    tt.return %out : tensor<8x8xf32, #src>
+  }
+}
+
+// -----
+
+// Four warps exchange a 16x16 i32 tile through 1024 bytes of CTA-local scratch.
+// Both input registers must be stored before the barrier. Both output registers
+// must come from shared loads after it, using the CSR-provided scratch base.
+// CHECK: ttg.shared = 1024 : i32
+// CHECK-LABEL: llvm.func @transpose_cta
+// CHECK: %[[LOCAL:.*]] = llvm.mlir.constant(3295 : i32)
+// CHECK: %[[BASE:.*]] = llvm.inline_asm asm_dialect = att "csrr $0, $1", "=r,i" %[[LOCAL]] : (i32) -> i32
+// CHECK: %[[PTR:.*]] = llvm.inttoptr %[[BASE]] : i32 to !llvm.ptr
+// CHECK: %[[IN0:.*]] = llvm.extractvalue %{{.*}}[0]
+// CHECK: %[[IN1:.*]] = llvm.extractvalue %{{.*}}[1]
+// CHECK: %[[WRITE0:.*]] = llvm.getelementptr inbounds %[[PTR]][%{{.*}}]
+// CHECK: %[[V0:.*]] = llvm.insertelement %[[IN0]], %{{.*}} : vector<1xi32>
+// CHECK: llvm.store %[[V0]], %[[WRITE0]] : vector<1xi32>, !llvm.ptr
+// CHECK: %[[WRITE1:.*]] = llvm.getelementptr inbounds %[[PTR]][%{{.*}}]
+// CHECK: %[[V1:.*]] = llvm.insertelement %[[IN1]], %{{.*}} : vector<1xi32>
+// CHECK: llvm.store %[[V1]], %[[WRITE1]] : vector<1xi32>, !llvm.ptr
+// CHECK: llvm.inline_asm has_side_effects asm_dialect = att ".insn r 0x0b, 4, 0, x0, $0, $1", "r,r,~{memory}"
+// CHECK: %[[READ0:.*]] = llvm.getelementptr inbounds %[[PTR]][%{{.*}}]
+// CHECK: %[[R0:.*]] = llvm.load %[[READ0]] : !llvm.ptr -> vector<1xi32>
+// CHECK: %[[E0:.*]] = llvm.extractelement %[[R0]][%{{.*}} : i32] : vector<1xi32>
+// CHECK: %[[READ1:.*]] = llvm.getelementptr inbounds %[[PTR]][%{{.*}}]
+// CHECK: %[[R1:.*]] = llvm.load %[[READ1]] : !llvm.ptr -> vector<1xi32>
+// CHECK: %[[E1:.*]] = llvm.extractelement %[[R1]][%{{.*}} : i32] : vector<1xi32>
+// CHECK: %[[RESULT0:.*]] = llvm.insertvalue %[[E0]], %{{.*}}[0]
+// CHECK: %[[RESULT1:.*]] = llvm.insertvalue %[[E1]], %[[RESULT0]][1]
+// CHECK: llvm.return %[[RESULT1]]
+
+#src = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [2, 16], warpsPerCTA = [4, 1], order = [1, 0]}>
+#transposed = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [16, 2], warpsPerCTA = [1, 4], order = [0, 1]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "vortex:32", "ttg.threads-per-warp" = 32 : i32} {
+  tt.func @transpose_cta(%arg: tensor<16x16xi32, #src>) -> tensor<16x16xi32, #src> {
+    %t = tt.trans %arg {order = array<i32: 1, 0>} : tensor<16x16xi32, #src> -> tensor<16x16xi32, #transposed>
+    %out = ttg.convert_layout %t : tensor<16x16xi32, #transposed> -> tensor<16x16xi32, #src>
+    tt.return %out : tensor<16x16xi32, #src>
+  }
+}

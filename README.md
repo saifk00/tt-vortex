@@ -7,10 +7,10 @@ The aim is to make the whole path from a Python kernel to simulated GPU executio
 small enough to follow. Integer copy and add work through both Python JIT launches
 and generated AOT launchers, on SimX and processor RTL simulation.
 
-This is still an experimental compiler. It supports one-dimensional blocked
-tensors, f32 addition, i32 reductions and scans, and relaxed i32 atomic addition.
-Reductions and scans use Vortex shuffles and shared memory. Transpose remains
-unsupported, and codegen is deliberately simple.
+This is still an experimental compiler. It supports rank-one/two blocked tensors
+and sliced layouts, f32 addition, i32 reductions and scans, relaxed i32 atomic
+addition, and tiled transpose. Layout conversions reuse Triton's lowering with
+Vortex shuffles and shared memory. Codegen is deliberately simple.
 
 Binary wheels include the native lowering and AOT templates; the Vortex SDK is
 still a separate dependency. Set `VORTEX_SDK_PATH` to its root (`source/`, `tools/`,
@@ -89,9 +89,9 @@ make check-ir
 bash ci/test.sh
 ```
 
-FileCheck tests cover the native lowering; transpose is marked as an expected
-failure until its layout support lands. The Python tests also simulate the
-[basic kernels](examples/basic.py), including partial tiles and returned atomic values.
+FileCheck tests cover the native lowering. The Python tests also simulate the
+[basic kernels](examples/basic.py), including partial tiles, returned atomic
+values, and rectangular transposes across different tile sizes and warp counts.
 The add checks exercise both launch paths, checking that their outputs and all
 38 counter deltas agree. Both examples use the same buffers, uploads, warm-up,
 and measurement boundaries; host wall-clock timings are excluded. CI runs this

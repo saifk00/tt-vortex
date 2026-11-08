@@ -68,7 +68,7 @@ jobs:
         run: |
           make check-ir LIT_ARGS='-v --xunit-xml-output build/lit-results.xml'
           python -m unittest discover -s tests -p test_opt.py -v
-      - name: Installed wheel compiler tests and JIT/AOT add on SimX
+      - name: Installed wheel kernel simulations and JIT/AOT agreement
         run: |
           python ci/test_wheel.py dist/portable/*.whl --python python3.12 --output build/ci-py312
           python ci/test_wheel.py dist/portable/*.whl --python python3.13 --output build/ci

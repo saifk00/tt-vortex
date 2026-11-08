@@ -1,6 +1,3 @@
-// XFAIL: *
-// Rank-two tensors and sliced layouts are not supported yet. Keep the expected
-// lowering checks below; an unexpected pass should prompt removal of XFAIL.
 // RUN: ttvortex-opt %s --pass-pipeline='builtin.module(convert-scf-to-cf,convert-triton-gpu-to-vortex-llvm,reconcile-unrealized-casts,canonicalize,cse,symbol-dce)' -o %t
 // RUN: FileCheck %s --input-file=%t --implicit-check-not='tensor<' --implicit-check-not='unrealized_conversion_cast' --implicit-check-not='tt.' --implicit-check-not='ttg.convert_layout'
 // RUN: FileCheck %s --check-prefix=ADDRESS --input-file=%t

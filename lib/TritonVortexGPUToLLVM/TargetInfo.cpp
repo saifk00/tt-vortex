@@ -106,16 +106,23 @@ Value TargetInfo::loadDShared(RewriterBase &rewriter, Location loc, Value ptr,
 
 Value TargetInfo::shuffle(RewriterBase &rewriter, Location loc, Value val,
                           Value index, unsigned mode) const {
-  if (!val.getType().isInteger(32))
-    llvm::report_fatal_error("Vortex shuffles currently require i32");
+  Type type = val.getType();
+  if (!type.isInteger(32) && !type.isF32())
+    llvm::report_fatal_error("Vortex shuffles currently require i32 or f32");
   auto b = TritonLLVMOpBuilder(loc, rewriter);
+  // The shuffle operates on integer registers. Move floating-point payloads
+  // without numerical conversion, preserving NaN payloads and signed zero.
+  if (type.isF32())
+    val = b.bitcast(val, rewriter.getI32Type());
   unsigned clamp = warpSize - 1;
   auto control =
       b.or_(index, b.i32_val((((~clamp) & 0x3f) << 12) | (clamp << 6)));
   // Like vx_shfl_bfly's volatile asm, keep all participating lanes executing.
-  return inlineAsm(rewriter, loc, val.getType(), ValueRange{val, control},
-                   ".insn r 0x0b, " + std::to_string(mode) + ", 1, $0, $1, $2",
-                   "=r,r,r", true);
+  Value shuffled = inlineAsm(
+      rewriter, loc, rewriter.getI32Type(), ValueRange{val, control},
+      ".insn r 0x0b, " + std::to_string(mode) + ", 1, $0, $1, $2",
+      "=r,r,r", true);
+  return type.isF32() ? b.bitcast(shuffled, type) : shuffled;
 }
 
 Value TargetInfo::shuffleXor(RewriterBase &rewriter, Location loc, Value val,

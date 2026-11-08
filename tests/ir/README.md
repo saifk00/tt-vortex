@@ -33,12 +33,10 @@ check data flow without fixing SSA names. `CHECK-LABEL` separates functions;
 `CHECK-NEXT` checks adjacent lines when adjacency matters. Keep checks focused
 on the behavior being tested instead of copying the entire generated module.
 
-## Lowering worklist
+## Coverage
 
-`float_add.ttgir`, `prefix_sum.ttgir`, and `atomic_sum.ttgir` pass. Transpose
-keeps its desired-output checks but is marked `XFAIL` until rank-two tensors
-and sliced layouts are supported. An unexpected pass fails CI so the marker
-gets removed when support lands. All other failures fail CI normally.
+All fixtures must compile and satisfy their FileCheck assertions; no expected
+failures remain.
 
 | Test | Expected lowering |
 | --- | --- |
@@ -46,12 +44,14 @@ gets removed when support lands. All other failures fail CI normally.
 | `prefix_sum` | Upward shuffles and addition, shared partial sums and a CTA barrier, both output elements. |
 | `atomic_sum` | Two masked monotonic atomic adds to the same output word, using the loaded values. |
 | `transpose` | Source/destination strides, x/y program IDs, shared exchange and barrier for the transposed layout. |
+| `transpose_exchange` | Isolated payload exchange: f32 bitcasts around indexed shuffles, and i32 shared stores/barrier/loads connected to the returned registers. |
 
 Scan and transpose checks target Triton's generic lowering algorithms using our
 existing Vortex shuffle/shared-memory hooks. These are structural codegen
-contracts; `tests/test_basic_runtime.py` also verifies float-add, scan, and atomic-add
-results on SimX, including IEEE float edge cases, partial tiles, overflow, and
-returned atomic values.
+contracts; `tests/test_basic_runtime.py` also verifies float-add, scan, atomic-add,
+and transpose results on SimX, including IEEE float edge cases, partial tiles,
+overflow, returned atomic values, and shared-memory reuse. Transpose is checked
+bit-for-bit for i32/f32, rectangular tiles, and one/two/four warps.
 Multiply, gather, and block sum already compile; block sum also has a passing IR
 test here. The native driver tests also cover parsing and bytecode round-tripping.
 

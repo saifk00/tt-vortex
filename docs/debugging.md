@@ -33,11 +33,12 @@ lldb \
   --mlir-disable-threading --mlir-print-ir-after-failure
 ```
 
-Use `next`, `step`, `frame variable`, and `bt` in LLDB. To inspect a rejection,
-use `tests/ir/transpose.ttgir` instead: it currently fails the rank/layout check.
-Set a breakpoint on the `op->emitError` line in `runOnOperation`; there,
-`expression -- op->dump()` prints the rejected operation. Clang Debug builds
-use `-fstandalone-debug` to retain the MLIR type information for these expressions.
+Use `next`, `step`, `frame variable`, and `bt` in LLDB.
+`expression -- op->dump()` prints an operation while stopped in the pass.
+Use `tests/ir/transpose.ttgir` to follow rank-two layout conversion, and add
+`--mlir-print-ir-before-all --mlir-print-ir-after-all` to inspect pass boundaries.
+Clang Debug builds use `-fstandalone-debug` to retain the MLIR type information
+for debugger expressions.
 
 Our lowering is compiled with debug information. Functions supplied by the
 prebuilt Triton wheel remain optimized; this does not rebuild Triton with debug

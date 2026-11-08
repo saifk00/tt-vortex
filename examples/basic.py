@@ -2,7 +2,7 @@
 
 Each program handles one tile. Sum and prefix-sum operate within that tile;
 atomic_sum accumulates into a single output word that the host must zero first.
-Float-add, scan, and atomic-add checks live in tests/test_basic_runtime.py.
+Float-add, scan, atomic-add, and transpose checks live in tests/test_basic_runtime.py.
 """
 
 import triton

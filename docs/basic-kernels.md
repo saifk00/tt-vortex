@@ -3,7 +3,7 @@
 [examples/basic.py](../examples/basic.py) exercises seven operations. All seven
 compile to NVIDIA sm80 CUBIN with Triton 3.9.0. The current Vortex results below
 use `vortex:32:32`, four warps, and `BLOCK=256` (a 16-by-16 tile for transpose).
-Float add, block sum, prefix sum, and atomic sum have simulator regression coverage.
+Float add, block sum, prefix sum, atomic sum, and transpose have simulator regression coverage.
 
 | Kernel | Vortex outcome |
 | --- | --- |
@@ -13,9 +13,9 @@ Float add, block sum, prefix sum, and atomic sum have simulator regression cover
 | `block_sum` | Produces LLVM IR, VXBIN, and the AOT launcher; masked sums verified on SimX. |
 | `prefix_sum` | Compiles and simulates correctly for i32; inclusive scan restarts each tile. |
 | `atomic_sum` | Compiles and simulates correctly for relaxed i32 atomic addition. |
-| `transpose` | `Vortex currently supports rank-one blocked integer or f32 tensors` |
+| `transpose` | Compiles and simulates correctly for out-of-place i32/f32 matrix transpose. |
 
-Float addition permits rank-one blocked `f32` tensors and registers Triton's
+Float addition registers Triton's
 `ElementwiseOpConversion<arith::AddFOp, LLVM::FAddOp>`, as NVIDIA does. This
 unpacks each thread's LLVM struct, emits scalar `llvm.fadd` operations, and
 repacks the result. The existing type converter and masked loads/stores already
@@ -23,10 +23,25 @@ handle f32. The SDK's RV32 F extension supplies native float arithmetic.
 Float reductions, scans, and atomics remain unsupported; this does not enable
 arbitrary floating-point operations or fp16/fp64 tensors.
 
-Transpose still reaches TTGIR but fails the rank-one blocked-layout restriction
-in [TritonGPUToLLVM.cpp](../lib/TritonVortexGPUToLLVM/TritonGPUToLLVM.cpp).
-It needs rank-two tensors, sliced layouts, and layout conversions. The early
-rejection does not identify every operation that may need support afterward.
+Transpose uses rank-two blocked tensors and sliced layouts, now accepted by
+[TritonGPUToLLVM.cpp](../lib/TritonVortexGPUToLLVM/TritonGPUToLLVM.cpp).
+Triton's generic view patterns lower expand-dims, broadcast, and `tt.trans`;
+`tt.trans` changes the coordinate/layout interpretation without moving registers.
+The following `ttg.convert_layout` redistributes values to the output owners.
+Triton's linear-layout machinery computes the shared-memory addresses, and
+our existing target hooks emit the loads, stores, and CTA barriers. No special
+case replaces the kernel with a different transpose algorithm.
+Within-warp conversions can instead use indexed shuffles. For f32 payloads the
+target hook bitcasts to i32, shuffles integer registers, and bitcasts back;
+there is no numerical conversion.
+
+Shared memory here is an explicitly addressed per-CTA scratchpad, separate from
+the L1 data cache. Its base comes from CSR `0xcdf`; the compiler reports its size
+in `ttg.shared` for the launcher. The 16-by-16, four-warp fixture needs 2048 bytes,
+including scratch for pointer and mask layout conversions. A barrier makes
+shared writes visible before other threads read them; Triton's allocation and
+memory-barrier analysis also protects scratch reuse. This is an out-of-place
+transpose with separate input and output buffers, not an in-place algorithm.
 
 The reduction lowering uses Triton's generic reduce and layout-conversion
 patterns with Vortex target hooks. For `BLOCK=256`, four 32-lane warps first
@@ -54,7 +69,7 @@ prefix (or remove the old generated SDK first), then source its `env.sh`.
 To check generated IR and actual simulated results:
 
 ```bash
-make check-ir IR_TESTS='tests/ir/float_add.ttgir tests/ir/prefix_sum.ttgir tests/ir/atomic_sum.ttgir'
+make check-ir
 source .cache/vortex-sdk/env.sh
 VORTEX_DRIVER=simx python -m unittest discover -s tests -p test_basic_runtime.py -v
 ```
@@ -65,6 +80,12 @@ wraparound, untouched output guards, and repeated accumulation. Additional
 kernels check returned atomic tickets and scalar-result broadcasts. Float-add
 checks exact non-NaN result bits (including rounding, signed zero, subnormals,
 and overflow) and NaN classification against NumPy.
+
+Transpose checks 600 launches: i32/f32 bit patterns, ten matrix shapes (including
+empty dimensions), five square/rectangular tiles, one/two/four warps, and two
+repeats. Extra fully masked CTAs, untouched output guards, and unchanged input
+buffers catch indexing errors and unwanted writes. Float values are compared
+as raw bits, preserving NaN payloads and signed zero.
 
 From the tt-vortex repository with the venv activated:
 

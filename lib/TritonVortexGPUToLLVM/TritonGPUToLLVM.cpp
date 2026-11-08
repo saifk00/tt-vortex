@@ -387,11 +387,18 @@ struct ConvertTritonGPUToVortexLLVM
           Type element = tensor.getElementType();
           if (auto ptr = dyn_cast<triton::PointerType>(element))
             element = ptr.getPointeeType();
-          if (tensor.getRank() != 1 ||
-              !isa<ttg::BlockedEncodingAttr>(tensor.getEncoding()) ||
+          // Generic view/layout patterns handle rank-two tiles and the sliced
+          // rank-one layouts used to construct their row/column coordinates.
+          Attribute layout = tensor.getEncoding();
+          while (auto slice = dyn_cast<ttg::SliceEncodingAttr>(layout))
+            layout = slice.getParent();
+          auto blocked = dyn_cast<ttg::BlockedEncodingAttr>(layout);
+          if (tensor.getRank() < 1 || tensor.getRank() > 2 || !blocked ||
+              blocked.getSizePerThread().size() > 2 ||
               !(isa<IntegerType>(element) || element.isF32())) {
             op->emitError(
-                "Vortex currently supports rank-one blocked integer or f32 tensors");
+                "Vortex requires rank-one/two integer or f32 tensors with "
+                "blocked layouts or slices of rank-one/two blocked layouts");
             return WalkResult::interrupt();
           }
         }
