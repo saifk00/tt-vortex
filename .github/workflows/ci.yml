@@ -56,9 +56,9 @@ jobs:
       - name: Build and register standalone backend
         run: |
           make native
-          python -m pip install --no-deps --no-build-isolation -e .
+          python -m pip install --no-build-isolation -e .
           make install-templates
-      - name: Compiler tests and AOT add on SimX
+      - name: Compiler tests and JIT/AOT add on SimX
         run: bash ci/test.sh
       - name: Save logs, generated launchers, IR and performance counters
         if: always()
@@ -68,7 +68,12 @@ jobs:
           path: |
             build/ci/*.log
             build/ci/*.csv
-            build/ci/kernel.*
+            build/ci/*.output.bin
             build/ci/ir/
+            build/ci/aot/*.log
+            build/ci/aot/*.csv
+            build/ci/aot/*.output.bin
+            build/ci/aot/kernel.*
+            build/ci/aot/ir/
             ci/dependencies.lock.json
           retention-days: 14

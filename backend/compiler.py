@@ -42,6 +42,8 @@ class VortexOptions:
     warp_size: int = 32
     debug: bool = False
     sanitize_overflow: bool = False
+    instrumentation_mode: str = ""
+    fpsan_homomorphic_casts: bool = False
     enable_fp_fusion: bool = False
     backend_name: str = "vortex"
     supported_fp8_dtypes: tuple = ()
@@ -49,6 +51,8 @@ class VortexOptions:
     max_num_imprecise_acc_default: int = 0
 
     def __post_init__(self):
+        if self.instrumentation_mode or self.fpsan_homomorphic_casts:
+            raise ValueError("Vortex does not support Triton instrumentation")
         if self.num_ctas != 1:
             raise ValueError("Vortex currently supports one CTA per program")
         if self.num_warps < 1 or self.num_warps & (self.num_warps - 1):

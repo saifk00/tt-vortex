@@ -18,7 +18,7 @@ native: configure
 	$(PYTHON) -m cmake --build build --parallel $(JOBS)
 
 install: native
-	uv pip install --python $(PYTHON) --no-deps --no-build-isolation -e .
+	uv pip install --python $(PYTHON) --no-build-isolation -e .
 	$(MAKE) install-templates
 
 # Triton's AOT CLI opens templates by filesystem path, bypassing entry points.

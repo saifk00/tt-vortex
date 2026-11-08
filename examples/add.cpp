@@ -34,6 +34,7 @@ static constexpr Counter counters[] = {
     CORE(IFETCHES), CORE(IFETCH_LT), CORE(LOADS), CORE(LOAD_LT), CORE(STORES),
     {"icache.READS", VX_DCR_MPM_CLASS_ICACHE, VX_CSR_MPM_ICACHE_READS},
     {"icache.MISS_R", VX_DCR_MPM_CLASS_ICACHE, VX_CSR_MPM_ICACHE_MISS_R},
+    {"icache.MSHR_ST", VX_DCR_MPM_CLASS_ICACHE, VX_CSR_MPM_ICACHE_MSHR_ST},
     DCACHE(READS), DCACHE(WRITES), DCACHE(MISS_R), DCACHE(MISS_W), DCACHE(EVICTS),
     DCACHE(BANK_ST), DCACHE(MSHR_ST),
 };
@@ -97,7 +98,6 @@ int main(int argc, char** argv) try {
         CHECK(vx_buffer_create(r.device, bytes, VX_MEM_READ_WRITE, &r.buffers[i]));
         CHECK(vx_buffer_address(r.buffers[i], &addresses[i]));
     }
-    CHECK(load_add_kernel(r.device));
     std::printf("CONFIG driver=%s cores=%" PRIu64 " hw_warps=%" PRIu64 " threads=%" PRIu64
                 " simd=%u program_warps=%u block=%u n=%u grid=%u\n",
                 std::getenv("VORTEX_DRIVER") ? std::getenv("VORTEX_DRIVER") : "default",
@@ -134,6 +134,11 @@ int main(int argc, char** argv) try {
         }
     };
 
+    // Match the Python example's unmeasured launch before collecting deltas.
+    prepare();
+    CHECK(load_add_kernel(r.device));
+    launch(n);
+
     std::ofstream summary(prefix + ".csv"), raw(prefix + ".counters.csv");
     if (!summary || !raw) throw std::runtime_error("cannot open benchmark CSV output");
     summary << "repeat,n,block,num_warps,hw_warps,grid,cycles,warp_instructions,cycles_per_element,host_launch_ms\n";
@@ -160,7 +165,7 @@ int main(int argc, char** argv) try {
                     " cycles/element=%.4f warp_IPC=%.4f PASS\n", repeat, cycles, instructions,
                     static_cast<double>(cycles) / n, static_cast<double>(instructions) / cycles);
         std::printf("HOST repeat=%u launch_and_finish_ms=%.3f (includes argument staging and cache flush)\n", repeat, host_ms);
-        for (size_t i = 2; i < after.size(); ++i) {
+        for (size_t i = 0; i < after.size(); ++i) {
             uint64_t delta = after[i] - before[i];
             raw << repeat << ',' << counters[i].name << ',' << delta << '\n';
             std::printf("COUNTER repeat=%u %s=%" PRIu64 "\n", repeat, counters[i].name, delta);
@@ -168,8 +173,11 @@ int main(int argc, char** argv) try {
     }
     std::printf("RESULT n=%u repeats=%u cycles_min=%" PRIu64 " cycles_mean=%.2f cycles_max=%" PRIu64 "\n",
                 n, repeats, min_cycles, static_cast<double>(total_cycles) / repeats, max_cycles);
-    std::printf("FILES %s.csv %s.counters.csv\n", prefix.c_str(), prefix.c_str());
-    std::puts("RUNTIME_REPORT cumulative across measured launches; VORTEX_PROFILING selects report class:");
+    std::ofstream output(prefix + ".output.bin", std::ios::binary);
+    output.write(reinterpret_cast<const char*>(dst.data()), bytes);
+    if (!output) throw std::runtime_error("cannot write output buffer");
+    std::printf("FILES %s.csv %s.counters.csv %s.output.bin\n", prefix.c_str(), prefix.c_str(), prefix.c_str());
+    std::puts("RUNTIME_REPORT cumulative including warm-up; VORTEX_PROFILING selects report class:");
     CHECK(vx_device_dump_perf(r.device, stdout));
     return 0;
 } catch (const std::exception& e) {
